@@ -38,8 +38,7 @@ poetry run huggingface-cli login
 .
 ├── models/                 # modelos baixados localmente, ignorados pelo Git
 ├── scripts/                # scripts de conveniencia
-│   ├── setup.sh            # configura venv e instala dependencias
-│   └── run_with_monitor.sh # monitoramento via terminal
+│   └── setup.sh            # configura venv e instala dependencias
 ├── src/                    # codigo Python do laboratorio
 │   ├── norta_llm/          # fluxo de inferencia, independente da web
 │   │   └── run_model.py

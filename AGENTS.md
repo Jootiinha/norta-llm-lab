@@ -14,8 +14,7 @@ O codigo Python fica diretamente em `src/` e deve ser executado pelos caminhos d
 .
 ├── models/                 # modelos locais; nao versionar pesos
 ├── scripts/                # scripts de conveniencia
-│   ├── setup.sh            # configura venv e instala dependencias
-│   └── run_with_monitor.sh # monitoramento via terminal
+│   └── setup.sh            # configura venv e instala dependencias
 ├── src/                    # codigo Python do projeto
 │   ├── norta_llm/          # fluxo de inferencia, independente da web
 │   │   └── run_model.py
