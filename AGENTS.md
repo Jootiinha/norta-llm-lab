@@ -15,9 +15,10 @@ O codigo Python fica diretamente em `src/` e deve ser executado pelos caminhos d
 ├── models/                 # modelos locais; nao versionar pesos
 ├── scripts/                # scripts de conveniencia
 │   ├── setup.sh            # configura venv e instala dependencias
-│   └── run.sh              # inferencia padrao
+│   └── run_with_monitor.sh # monitoramento via terminal
 ├── src/                    # codigo Python do projeto
 │   ├── run_model.py        # inferencia local
+│   ├── web_monitor.py      # interface web de acompanhamento
 │   └── utils/monitor.py    # monitor de recursos
 ├── Makefile                # atalhos de execucao
 ├── pyproject.toml          # dependencias do Poetry
@@ -41,13 +42,21 @@ Rodar inferencia padrao:
 make run
 ```
 
+Rodar interface web de acompanhamento:
+
+```bash
+make web
+```
+
+A interface web e o fluxo principal para acompanhar historico, min/max/media e execucoes. Ela lista modelos a partir de `models/`, nao exibe o console e salva a saida completa em `logs/runs/<run_id>/console.log`.
+
 Rodar inferencia com monitor vinculado ao PID:
 
 ```bash
 make run-monitor
 ```
 
-Esse fluxo mostra o monitor no topo, as ultimas linhas do console abaixo em tempo quase real e salva a saida completa em `logs/run-monitor-*.log`.
+Esse fluxo de terminal continua disponivel, mas a web deve ser preferida quando o objetivo for historico e acompanhamento de execucoes.
 
 Rodar monitor:
 

@@ -1,10 +1,12 @@
 import argparse
+import json
 import os
 import shutil
 import subprocess
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
 
@@ -43,6 +45,78 @@ class Metrics:
     pid_cpu_percent: float | None
     pid_mem_mb: float | None
     samples_per_second: float
+
+
+@dataclass
+class RunningStat:
+    count: int = 0
+    total: float = 0.0
+    min_value: float | None = None
+    max_value: float | None = None
+    last_value: float | None = None
+
+    def update(self, value: float | None) -> None:
+        if value is None:
+            return
+        self.count += 1
+        self.total += value
+        self.last_value = value
+        self.min_value = value if self.min_value is None else min(self.min_value, value)
+        self.max_value = value if self.max_value is None else max(self.max_value, value)
+
+    @property
+    def avg_value(self) -> float | None:
+        if self.count == 0:
+            return None
+        return self.total / self.count
+
+    def to_dict(self) -> dict[str, float | int | None]:
+        return {
+            "count": self.count,
+            "current": self.last_value,
+            "min": self.min_value,
+            "max": self.max_value,
+            "avg": self.avg_value,
+        }
+
+
+class RunStats:
+    def __init__(self, run_id: str | None) -> None:
+        self.run_id = run_id
+        self.started_at = datetime.now(timezone.utc)
+        self.samples = 0
+        self.fields = {
+            "cpu_percent": RunningStat(),
+            "mem_percent": RunningStat(),
+            "mem_used_gb": RunningStat(),
+            "cpu_temp_c": RunningStat(),
+            "gpu_percent": RunningStat(),
+            "gpu_temp_c": RunningStat(),
+            "gpu_mem_percent": RunningStat(),
+            "gpu_mem_used_mb": RunningStat(),
+            "pid_cpu_percent": RunningStat(),
+            "pid_mem_mb": RunningStat(),
+        }
+
+    def update(self, metrics: Metrics) -> None:
+        self.samples += 1
+        for name, stat in self.fields.items():
+            stat.update(getattr(metrics, name))
+
+    def to_dict(self, ended_at: datetime | None = None) -> dict[str, object]:
+        now = ended_at or datetime.now(timezone.utc)
+        return {
+            "run_id": self.run_id,
+            "started_at": self.started_at.isoformat(),
+            "ended_at": ended_at.isoformat() if ended_at else None,
+            "duration_seconds": round((now - self.started_at).total_seconds(), 3),
+            "samples": self.samples,
+            "metrics": {name: stat.to_dict() for name, stat in self.fields.items()},
+        }
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def color_for_percent(value: float) -> str:
@@ -179,6 +253,10 @@ def fmt_percent(value: float | None) -> str:
     return "--" if value is None else f"{value:5.1f}%"
 
 
+def fmt_number(value: float | None, suffix: str = "") -> str:
+    return "--" if value is None else f"{value:.1f}{suffix}"
+
+
 def card(title: str, value: str, detail: str, percent: float | None = None) -> str:
     bar = progress_bar(percent) if percent is not None else DIM + "░" * 22 + RESET
     return (
@@ -212,6 +290,59 @@ def truncate_line(value: str, width: int) -> str:
     if len(value) <= width:
         return value
     return value[: width - 1] + "…"
+
+
+def metrics_to_dict(metrics: Metrics) -> dict[str, float | str | None]:
+    return {
+        "cpu_percent": metrics.cpu_percent,
+        "mem_percent": metrics.mem_percent,
+        "mem_used_gb": metrics.mem_used_gb,
+        "mem_total_gb": metrics.mem_total_gb,
+        "cpu_temp_c": metrics.cpu_temp_c,
+        "gpu_name": metrics.gpu_name,
+        "gpu_percent": metrics.gpu_percent,
+        "gpu_temp_c": metrics.gpu_temp_c,
+        "gpu_mem_percent": metrics.gpu_mem_percent,
+        "gpu_mem_used_mb": metrics.gpu_mem_used_mb,
+        "gpu_mem_total_mb": metrics.gpu_mem_total_mb,
+        "pid_cpu_percent": metrics.pid_cpu_percent,
+        "pid_mem_mb": metrics.pid_mem_mb,
+        "samples_per_second": metrics.samples_per_second,
+    }
+
+
+def append_metrics_sample(path: Path | None, run_id: str | None, metrics: Metrics, elapsed_seconds: float) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": utc_now_iso(),
+        "run_id": run_id,
+        "elapsed_seconds": round(elapsed_seconds, 3),
+        "metrics": metrics_to_dict(metrics),
+    }
+    with path.open("a", encoding="utf-8") as file:
+        file.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def write_summary(path: Path | None, stats: RunStats, ended_at: datetime | None = None) -> None:
+    if path is None:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(stats.to_dict(ended_at), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
+def stat_line(label: str, stat: RunningStat, suffix: str = "") -> str:
+    return (
+        f"{label:<12}"
+        f" atual {fmt_number(stat.last_value, suffix):>8}"
+        f" min {fmt_number(stat.min_value, suffix):>8}"
+        f" max {fmt_number(stat.max_value, suffix):>8}"
+        f" media {fmt_number(stat.avg_value, suffix):>8}"
+    )
 
 
 def collect_metrics(
@@ -261,6 +392,7 @@ def render(
     metrics: Metrics,
     history: dict[str, deque[float]],
     pid: int | None,
+    stats: RunStats,
     log_file: Path | None = None,
     log_lines: int = 0,
 ) -> str:
@@ -311,6 +443,15 @@ def render(
             f"RAM  {sparkline(history['mem'])} {metrics.mem_percent:5.1f}%",
             f"GPU  {sparkline(history['gpu'])} {fmt_percent(metrics.gpu_percent)}",
             f"VRAM {sparkline(history['vram'])} {fmt_percent(metrics.gpu_mem_percent)}",
+            line,
+            f"{BOLD}{BLUE}Resumo da execucao{RESET} {DIM}{stats.run_id or 'sem run_id'} | {stats.samples} amostras{RESET}",
+            stat_line("CPU %", stats.fields["cpu_percent"], "%"),
+            stat_line("RAM %", stats.fields["mem_percent"], "%"),
+            stat_line("RAM GB", stats.fields["mem_used_gb"], " GB"),
+            stat_line("GPU %", stats.fields["gpu_percent"], "%"),
+            stat_line("VRAM %", stats.fields["gpu_mem_percent"], "%"),
+            stat_line("Proc CPU %", stats.fields["pid_cpu_percent"], "%"),
+            stat_line("Proc RAM MB", stats.fields["pid_mem_mb"], " MB"),
         ]
     )
 
@@ -334,6 +475,9 @@ def main() -> None:
     parser.add_argument("--exit-when-pid-exits", action="store_true", help="Encerra quando o PID informado nao existir mais.")
     parser.add_argument("--log-file", type=Path, default=None, help="Arquivo de log para exibir abaixo do monitor.")
     parser.add_argument("--log-lines", type=int, default=12, help="Quantidade de linhas do log exibidas no console.")
+    parser.add_argument("--run-id", default=None, help="Identificador da execucao monitorada.")
+    parser.add_argument("--metrics-file", type=Path, default=None, help="Arquivo JSONL para salvar amostras de metricas.")
+    parser.add_argument("--summary-file", type=Path, default=None, help="Arquivo JSON para salvar resumo da execucao.")
     args = parser.parse_args()
 
     history = {
@@ -345,6 +489,8 @@ def main() -> None:
 
     previous_cpu = read_cpu_snapshot()
     previous_pid_ticks = None
+    stats = RunStats(args.run_id)
+    started_monotonic = time.monotonic()
 
     print(HIDE_CURSOR, end="")
     try:
@@ -359,8 +505,16 @@ def main() -> None:
             history["mem"].append(metrics.mem_percent)
             history["gpu"].append(metrics.gpu_percent or 0.0)
             history["vram"].append(metrics.gpu_mem_percent or 0.0)
+            stats.update(metrics)
+            append_metrics_sample(
+                args.metrics_file,
+                args.run_id,
+                metrics,
+                time.monotonic() - started_monotonic,
+            )
+            write_summary(args.summary_file, stats)
 
-            print(render(metrics, history, args.pid, args.log_file, args.log_lines), end="", flush=True)
+            print(render(metrics, history, args.pid, stats, args.log_file, args.log_lines), end="", flush=True)
             if args.once:
                 break
             if args.exit_when_pid_exits and args.pid is not None and not Path(f"/proc/{args.pid}").exists():
@@ -368,6 +522,7 @@ def main() -> None:
     except KeyboardInterrupt:
         pass
     finally:
+        write_summary(args.summary_file, stats, datetime.now(timezone.utc))
         print(SHOW_CURSOR)
 
 

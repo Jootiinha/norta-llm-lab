@@ -2,6 +2,8 @@
 
 Laboratorio local para testar modelos de linguagem com `transformers`, acompanhar uso de CPU/GPU e manter os pesos dos modelos fora do Git.
 
+Inicialmente quero fazer um "recomendador" de builds para o hearts of iron 4
+
 ## Requisitos
 
 - Python 3.11 ou 3.12
@@ -37,9 +39,10 @@ poetry run huggingface-cli login
 ├── models/                 # modelos baixados localmente, ignorados pelo Git
 ├── scripts/                # scripts de conveniencia
 │   ├── setup.sh            # configura venv e instala dependencias
-│   └── run.sh              # inferencia padrao
+│   └── run_with_monitor.sh # monitoramento via terminal
 ├── src/                    # codigo Python do laboratorio
 │   ├── run_model.py        # inferencia local
+│   ├── web_monitor.py      # interface web de acompanhamento
 │   └── utils/monitor.py    # monitor de recursos
 ├── Makefile                # atalhos de execucao
 ├── pyproject.toml          # dependencias e configuracao do Poetry
@@ -105,13 +108,37 @@ O script padrao usa `models/qwen3-0.6b`:
 make run
 ```
 
+## Interface web
+
+Para acompanhar execucoes, historico, metricas em tempo real e min/max/media por execucao:
+
+```bash
+make web
+```
+
+Depois abra:
+
+```text
+http://127.0.0.1:8000
+```
+
+A interface web lista automaticamente os modelos encontrados em `models/`, permite iniciar execucoes, selecionar execucoes anteriores e acompanhar CPU, RAM, GPU, VRAM e uso do processo. Os dados de cada execucao ficam em `logs/runs/<run_id>/`:
+
+- `console.log`: saida completa do programa
+- `metrics.jsonl`: amostras de metricas
+- `summary.json`: resumo com minimo, maximo e media
+- `run.env`: parametros usados na execucao
+- `status.txt`: estado final ou atual
+
+O console nao e exibido na interface web; ele fica salvo em `console.log`.
+
 Para rodar a inferencia e abrir o monitor vinculado ao PID do processo:
 
 ```bash
 make run-monitor
 ```
 
-O terminal mostra os dados do monitor no topo e as ultimas linhas do console abaixo, atualizadas em tempo quase real. A saida completa tambem fica salva em `logs/run-monitor-*.log`.
+O terminal mostra os dados do monitor no topo e as ultimas linhas do console abaixo, atualizadas em tempo quase real. A saida completa tambem fica salva na pasta da execucao em `logs/runs/<run_id>/`.
 
 Para mudar a quantidade de linhas do console exibidas abaixo do monitor:
 
