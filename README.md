@@ -41,9 +41,11 @@ poetry run huggingface-cli login
 │   ├── setup.sh            # configura venv e instala dependencias
 │   └── run_with_monitor.sh # monitoramento via terminal
 ├── src/                    # codigo Python do laboratorio
-│   ├── run_model.py        # inferencia local
-│   ├── web_monitor.py      # interface web de acompanhamento
-│   └── utils/monitor.py    # monitor de recursos
+│   ├── norta_llm/          # fluxo de inferencia, independente da web
+│   │   └── run_model.py
+│   ├── web_service/        # servidor e interface web
+│   │   ├── server.py
+│   │   └── metrics.py
 ├── Makefile                # atalhos de execucao
 ├── pyproject.toml          # dependencias e configuracao do Poetry
 └── README.md               # documentacao do projeto
@@ -122,7 +124,11 @@ Depois abra:
 http://127.0.0.1:8000
 ```
 
-A interface web lista automaticamente os modelos encontrados em `models/`, permite iniciar execucoes, selecionar execucoes anteriores e acompanhar CPU, RAM, GPU, VRAM e uso do processo. Os dados de cada execucao ficam em `logs/runs/<run_id>/`:
+A interface web lista automaticamente os modelos encontrados em `models/`, permite iniciar execucoes, selecionar execucoes anteriores e acompanhar CPU, RAM, GPU, VRAM e uso do processo. Cada inferencia roda como processo isolado em uma sessao propria, separada do servidor web.
+
+No formulario da web, voce pode ligar ou desligar metricas em tempo real e escolher o intervalo de coleta. Use intervalos maiores, como 5 segundos, quando quiser reduzir a interferencia do monitoramento.
+
+Os dados de cada execucao ficam em `logs/runs/<run_id>/`:
 
 - `console.log`: saida completa do programa
 - `metrics.jsonl`: amostras de metricas
@@ -132,45 +138,13 @@ A interface web lista automaticamente os modelos encontrados em `models/`, permi
 
 O console nao e exibido na interface web; ele fica salvo em `console.log`.
 
-Para rodar a inferencia e abrir o monitor vinculado ao PID do processo:
-
-```bash
-make run-monitor
-```
-
-O terminal mostra os dados do monitor no topo e as ultimas linhas do console abaixo, atualizadas em tempo quase real. A saida completa tambem fica salva na pasta da execucao em `logs/runs/<run_id>/`.
-
-Para mudar a quantidade de linhas do console exibidas abaixo do monitor:
-
-```bash
-MONITOR_LOG_LINES=20 make run-monitor
-```
-
 Para escolher outro modelo ou prompt:
 
 ```bash
-poetry run python -B src/run_model.py \
+poetry run python -B src/norta_llm/run_model.py \
   --model models/gemma-3-gaia-ptbr-4b-it \
   --prompt "Explique em portugues brasileiro o que e RAG em LLMs." \
   --max-new-tokens 300
-```
-
-## Monitorar recursos
-
-```bash
-make monitor
-```
-
-Com intervalo customizado:
-
-```bash
-make monitor ARGS="--interval 0.5"
-```
-
-Para acompanhar um processo especifico:
-
-```bash
-make monitor ARGS="--pid 12345"
 ```
 
 ## Limpeza

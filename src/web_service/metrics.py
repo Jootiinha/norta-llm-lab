@@ -1,26 +1,14 @@
-import argparse
 import json
 import os
-import shutil
 import subprocess
 import time
-from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
 
-RESET = "\033[0m"
-BOLD = "\033[1m"
-DIM = "\033[2m"
-GREEN = "\033[32m"
-YELLOW = "\033[33m"
-RED = "\033[31m"
-CYAN = "\033[36m"
-BLUE = "\033[34m"
-HIDE_CURSOR = "\033[?25l"
-SHOW_CURSOR = "\033[?25h"
-CLEAR = "\033[2J\033[H"
+GPU_RETRY_SECONDS = 30.0
+_GPU_RETRY_AFTER = 0.0
 
 
 @dataclass
@@ -119,14 +107,6 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def color_for_percent(value: float) -> str:
-    if value >= 90:
-        return RED
-    if value >= 70:
-        return YELLOW
-    return GREEN
-
-
 def read_cpu_snapshot() -> CpuSnapshot:
     values = Path("/proc/stat").read_text().splitlines()[0].split()[1:]
     nums = [int(value) for value in values]
@@ -176,6 +156,12 @@ def read_cpu_temp() -> float | None:
 
 
 def read_gpu() -> tuple[str, float, float, float, float, float] | None:
+    global _GPU_RETRY_AFTER
+
+    now = time.monotonic()
+    if now < _GPU_RETRY_AFTER:
+        return None
+
     query = (
         "--query-gpu=name,utilization.gpu,temperature.gpu,"
         "memory.used,memory.total"
@@ -188,10 +174,17 @@ def read_gpu() -> tuple[str, float, float, float, float, float] | None:
     try:
         output = subprocess.check_output(command, text=True, stderr=subprocess.DEVNULL)
     except (OSError, subprocess.CalledProcessError):
+        _GPU_RETRY_AFTER = now + GPU_RETRY_SECONDS
         return None
 
-    first_gpu = output.strip().splitlines()[0].split(",")
+    lines = output.strip().splitlines()
+    if not lines:
+        _GPU_RETRY_AFTER = now + GPU_RETRY_SECONDS
+        return None
+
+    first_gpu = lines[0].split(",")
     if len(first_gpu) < 5:
+        _GPU_RETRY_AFTER = now + GPU_RETRY_SECONDS
         return None
 
     name = first_gpu[0].strip()

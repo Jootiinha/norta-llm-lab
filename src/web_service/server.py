@@ -1,5 +1,6 @@
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -10,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from utils.monitor import (
+from web_service.metrics import (
     RunStats,
     append_metrics_sample,
     collect_metrics,
@@ -19,7 +20,7 @@ from utils.monitor import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 LOG_ROOT = ROOT / "logs" / "runs"
 DEFAULT_MODEL = "models/qwen3-0.6b"
 DEFAULT_PROMPT = "Explique em portugues brasileiro o que e RAG em LLMs."
@@ -103,8 +104,15 @@ class RunManager:
         self.lock = threading.Lock()
         LOG_ROOT.mkdir(parents=True, exist_ok=True)
 
-    def start(self, model: str, prompt: str, max_new_tokens: int) -> dict:
-        run_id = datetime.now().strftime("%Y%m%d-%H%M%S")
+    def start(
+        self,
+        model: str,
+        prompt: str,
+        max_new_tokens: int,
+        metrics_enabled: bool,
+        metrics_interval: float,
+    ) -> dict:
+        run_id = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
         run_dir = LOG_ROOT / run_id
         run_dir.mkdir(parents=True, exist_ok=False)
 
@@ -119,6 +127,8 @@ class RunManager:
                     f"MODEL={model}",
                     f"PROMPT={prompt}",
                     f"MAX_NEW_TOKENS={max_new_tokens}",
+                    f"METRICS_ENABLED={str(metrics_enabled).lower()}",
+                    f"METRICS_INTERVAL={metrics_interval}",
                     f"STARTED_AT={utc_now()}",
                     "",
                 ]
@@ -135,7 +145,7 @@ class RunManager:
                 sys.executable,
                 "-u",
                 "-B",
-                "src/run_model.py",
+                "src/norta_llm/run_model.py",
                 "--model",
                 model,
                 "--prompt",
@@ -148,6 +158,7 @@ class RunManager:
             stdout=output,
             stderr=subprocess.STDOUT,
             text=True,
+            start_new_session=True,
         )
 
         with self.lock:
@@ -155,7 +166,16 @@ class RunManager:
 
         thread = threading.Thread(
             target=self._monitor_process,
-            args=(run_id, process, output, metrics_file, summary_file, run_dir),
+            args=(
+                run_id,
+                process,
+                output,
+                metrics_file,
+                summary_file,
+                run_dir,
+                metrics_enabled,
+                metrics_interval,
+            ),
             daemon=True,
         )
         thread.start()
@@ -167,7 +187,10 @@ class RunManager:
             process = self.active.get(run_id)
         if process is None or process.poll() is not None:
             return False
-        process.terminate()
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return False
         return True
 
     def _monitor_process(
@@ -178,22 +201,31 @@ class RunManager:
         metrics_file: Path,
         summary_file: Path,
         run_dir: Path,
+        metrics_enabled: bool,
+        metrics_interval: float,
     ) -> None:
         stats = RunStats(run_id)
         started = time.monotonic()
-        previous_cpu = read_cpu_snapshot()
+        previous_cpu = read_cpu_snapshot() if metrics_enabled else None
         previous_pid_ticks = None
+        last_summary_write = 0.0
 
-        while process.poll() is None:
+        while process.poll() is None and metrics_enabled and previous_cpu is not None:
             metrics, previous_cpu, previous_pid_ticks = collect_metrics(
                 previous_cpu,
                 previous_pid_ticks,
                 process.pid,
-                1.0,
+                metrics_interval,
             )
             stats.update(metrics)
-            append_metrics_sample(metrics_file, run_id, metrics, time.monotonic() - started)
-            write_summary(summary_file, stats)
+            now = time.monotonic()
+            append_metrics_sample(metrics_file, run_id, metrics, now - started)
+            if now - last_summary_write >= 5.0:
+                write_summary(summary_file, stats)
+                last_summary_write = now
+
+        if not metrics_enabled:
+            process.wait()
 
         ended_at = datetime.now(timezone.utc)
         write_summary(summary_file, stats, ended_at)
@@ -427,18 +459,19 @@ INDEX_HTML = r"""<!doctype html>
     }
     canvas {
       width: 100%;
-      height: 220px;
+      height: 300px;
       display: block;
       cursor: crosshair;
     }
     .chart-wrap {
       position: relative;
+      padding-top: 2px;
     }
     .chart-legend {
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin-bottom: 8px;
+      margin-bottom: 10px;
     }
     .legend-item {
       display: inline-flex;
@@ -447,10 +480,12 @@ INDEX_HTML = r"""<!doctype html>
       border: 1px solid var(--line);
       background: white;
       border-radius: 999px;
-      padding: 5px 9px;
+      padding: 6px 10px;
       color: var(--text);
       cursor: pointer;
       user-select: none;
+      font-size: 12px;
+      font-weight: 650;
     }
     .legend-item.off {
       opacity: 0.42;
@@ -463,14 +498,14 @@ INDEX_HTML = r"""<!doctype html>
     }
     .chart-tooltip {
       position: absolute;
-      min-width: 180px;
-      max-width: 280px;
+      min-width: 210px;
+      max-width: 300px;
       pointer-events: none;
       background: #ffffff;
       border: 1px solid var(--line);
       box-shadow: 0 8px 24px rgba(15, 23, 42, 0.12);
       border-radius: 6px;
-      padding: 8px;
+      padding: 10px;
       font-size: 12px;
       color: var(--text);
       z-index: 2;
@@ -483,7 +518,18 @@ INDEX_HTML = r"""<!doctype html>
       align-items: center;
       justify-content: space-between;
       gap: 16px;
-      margin-top: 3px;
+      margin-top: 5px;
+    }
+    .inline-field {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text);
+      font-size: 13px;
+      font-weight: 500;
+    }
+    .inline-field input {
+      width: auto;
     }
     pre {
       margin: 0;
@@ -538,6 +584,17 @@ INDEX_HTML = r"""<!doctype html>
         <label>Max tokens
           <input id="tokensInput" type="number" min="1" max="8192" value="300">
         </label>
+        <label>Intervalo de metricas
+          <select id="metricsIntervalInput">
+            <option value="1">1 segundo</option>
+            <option value="2" selected>2 segundos</option>
+            <option value="5">5 segundos</option>
+          </select>
+        </label>
+        <label class="inline-field">
+          <input id="metricsEnabledInput" type="checkbox" checked>
+          Metricas em tempo real
+        </label>
         <button class="primary" type="submit">Iniciar execucao</button>
       </form>
       <div class="row" style="margin-bottom: 10px;">
@@ -561,7 +618,7 @@ INDEX_HTML = r"""<!doctype html>
           <h2>Historico de uso</h2>
           <div class="chart-wrap">
             <div id="chartLegend" class="chart-legend"></div>
-            <canvas id="chart" width="1000" height="260"></canvas>
+            <canvas id="chart" width="1100" height="340"></canvas>
             <div id="chartTooltip" class="chart-tooltip" hidden></div>
           </div>
         </div>
@@ -585,6 +642,14 @@ INDEX_HTML = r"""<!doctype html>
 
     function fmt(value, suffix = "") {
       return value === null || value === undefined ? "--" : `${Number(value).toFixed(1)}${suffix}`;
+    }
+
+    function fmtElapsed(seconds) {
+      if (seconds === null || seconds === undefined) return "--";
+      const total = Math.max(0, Math.round(Number(seconds)));
+      const minutes = Math.floor(total / 60);
+      const rest = total % 60;
+      return minutes ? `${minutes}m ${String(rest).padStart(2, "0")}s` : `${rest}s`;
     }
 
     function statusClass(status) {
@@ -690,7 +755,10 @@ INDEX_HTML = r"""<!doctype html>
       $("empty").hidden = true;
       $("detail").hidden = false;
       $("runTitle").textContent = detail.id;
-      $("runMeta").textContent = `${detail.env.MODEL || ""} | ${detail.status}`;
+      const metricsMode = detail.env.METRICS_ENABLED === "false"
+        ? "metricas desligadas"
+        : `metricas a cada ${detail.env.METRICS_INTERVAL || "?"}s`;
+      $("runMeta").textContent = `${detail.env.MODEL || ""} | ${detail.status} | ${metricsMode}`;
       $("stopBtn").disabled = detail.status !== "running";
       $("cards").innerHTML = [
         card("CPU", "cpu_percent", "%"),
@@ -730,10 +798,10 @@ INDEX_HTML = r"""<!doctype html>
       const ctx = canvas.getContext("2d");
       const w = canvas.width;
       const h = canvas.height;
-      const left = 46;
-      const right = 16;
+      const left = 54;
+      const right = 24;
       const top = 18;
-      const bottom = 28;
+      const bottom = 42;
       const plotW = w - left - right;
       const plotH = h - top - bottom;
       const enabledSeries = chartSeries.filter((serie) => serie.enabled);
@@ -741,8 +809,12 @@ INDEX_HTML = r"""<!doctype html>
       ctx.clearRect(0, 0, w, h);
       ctx.fillStyle = "#ffffff";
       ctx.fillRect(0, 0, w, h);
+
+      ctx.fillStyle = "#fbfcfd";
+      ctx.fillRect(left, top, plotW, plotH);
       ctx.strokeStyle = "#d9dee7";
       ctx.lineWidth = 1;
+      ctx.font = "12px system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif";
       for (let i = 0; i <= 4; i++) {
         const y = top + i * (plotH / 4);
         ctx.beginPath();
@@ -750,18 +822,37 @@ INDEX_HTML = r"""<!doctype html>
         ctx.lineTo(w - right, y);
         ctx.stroke();
         ctx.fillStyle = "#647184";
-        ctx.fillText(`${100 - i * 25}%`, 8, y + 4);
+        ctx.textAlign = "right";
+        ctx.fillText(`${100 - i * 25}%`, left - 10, y + 4);
       }
+      ctx.strokeStyle = "#9aa4b2";
+      ctx.beginPath();
+      ctx.moveTo(left, top);
+      ctx.lineTo(left, top + plotH);
+      ctx.lineTo(left + plotW, top + plotH);
+      ctx.stroke();
 
       if (!rows.length) {
         ctx.fillStyle = "#647184";
+        ctx.textAlign = "left";
         ctx.fillText("Sem amostras para exibir.", left, h / 2);
         return;
       }
 
+      const xLabelIndexes = [...new Set([0, Math.floor((rows.length - 1) / 2), rows.length - 1])];
+      ctx.fillStyle = "#647184";
+      ctx.textAlign = "center";
+      xLabelIndexes.forEach((index) => {
+        const row = rows[index];
+        const x = left + (index / Math.max(rows.length - 1, 1)) * plotW;
+        ctx.fillText(fmtElapsed(row.elapsed_seconds), x, h - 12);
+      });
+
       enabledSeries.forEach((serie) => {
         ctx.strokeStyle = serie.color;
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 2.4;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
         ctx.beginPath();
         rows.forEach((row, i) => {
           const value = row.metrics[serie.key] ?? 0;
@@ -772,15 +863,17 @@ INDEX_HTML = r"""<!doctype html>
         });
         ctx.stroke();
 
+        const pointStep = rows.length > 90 ? Math.ceil(rows.length / 90) : 1;
         rows.forEach((row, i) => {
+          if (i % pointStep !== 0 && chartState.hoverIndex !== i) return;
           const value = row.metrics[serie.key] ?? 0;
           const x = left + (i / Math.max(rows.length - 1, 1)) * plotW;
           const y = top + (1 - Math.max(0, Math.min(100, value)) / 100) * plotH;
           ctx.fillStyle = "#ffffff";
           ctx.strokeStyle = serie.color;
-          ctx.lineWidth = chartState.hoverIndex === i ? 2.5 : 1.5;
+          ctx.lineWidth = chartState.hoverIndex === i ? 2.4 : 1.2;
           ctx.beginPath();
-          ctx.arc(x, y, chartState.hoverIndex === i ? 4.5 : 3, 0, Math.PI * 2);
+          ctx.arc(x, y, chartState.hoverIndex === i ? 5 : 2.4, 0, Math.PI * 2);
           ctx.fill();
           ctx.stroke();
           chartState.points.push({ index: i, x, y, serie, row, value });
@@ -789,8 +882,8 @@ INDEX_HTML = r"""<!doctype html>
 
       if (chartState.hoverIndex !== null && rows[chartState.hoverIndex]) {
         const x = left + (chartState.hoverIndex / Math.max(rows.length - 1, 1)) * plotW;
-        ctx.strokeStyle = "#17202a";
-        ctx.setLineDash([4, 4]);
+        ctx.strokeStyle = "rgba(23, 32, 42, 0.45)";
+        ctx.setLineDash([5, 5]);
         ctx.beginPath();
         ctx.moveTo(x, top);
         ctx.lineTo(x, top + plotH);
@@ -810,8 +903,8 @@ INDEX_HTML = r"""<!doctype html>
       const rect = canvas.getBoundingClientRect();
       const scaleX = canvas.width / rect.width;
       const x = (event.clientX - rect.left) * scaleX;
-      const left = 46;
-      const right = 16;
+      const left = 54;
+      const right = 24;
       const plotW = canvas.width - left - right;
       const rawIndex = Math.round(((x - left) / plotW) * Math.max(rows.length - 1, 1));
       const index = Math.max(0, Math.min(rows.length - 1, rawIndex));
@@ -829,12 +922,13 @@ INDEX_HTML = r"""<!doctype html>
           </div>
         `)
         .join("");
-      tooltip.innerHTML = `<strong>Amostra ${index + 1}</strong><div class="muted">${timestamp}</div>${values}`;
+      tooltip.innerHTML = `<strong>Amostra ${index + 1}</strong><div class="muted">${fmtElapsed(row.elapsed_seconds)} | ${timestamp}</div>${values}`;
       tooltip.hidden = false;
-      const localX = event.clientX - rect.left;
-      const localY = event.clientY - rect.top;
-      tooltip.style.left = `${Math.min(localX + 14, rect.width - 294)}px`;
-      tooltip.style.top = `${Math.max(localY - 20, 8)}px`;
+      const localX = canvas.offsetLeft + event.clientX - rect.left;
+      const localY = canvas.offsetTop + event.clientY - rect.top;
+      const maxLeft = canvas.offsetLeft + rect.width - 318;
+      tooltip.style.left = `${Math.max(8, Math.min(localX + 14, maxLeft))}px`;
+      tooltip.style.top = `${Math.max(localY - 18, 8)}px`;
     }
 
     function clearChartHover() {
@@ -849,6 +943,8 @@ INDEX_HTML = r"""<!doctype html>
         model: $("modelInput").value,
         prompt: $("promptInput").value,
         max_new_tokens: Number($("tokensInput").value || 300),
+        metrics_enabled: $("metricsEnabledInput").checked,
+        metrics_interval: Number($("metricsIntervalInput").value || 2),
       };
       if (!payload.model) {
         $("serverStatus").textContent = "nenhum modelo disponivel";
@@ -921,7 +1017,18 @@ class Handler(BaseHTTPRequestHandler):
             model = str(payload.get("model") or DEFAULT_MODEL)
             prompt = str(payload.get("prompt") or DEFAULT_PROMPT)
             max_new_tokens = int(payload.get("max_new_tokens") or 300)
-            self.send_json(self.manager.start(model, prompt, max_new_tokens), HTTPStatus.CREATED)
+            metrics_enabled = bool(payload.get("metrics_enabled", True))
+            metrics_interval = max(1.0, float(payload.get("metrics_interval") or 2.0))
+            self.send_json(
+                self.manager.start(
+                    model,
+                    prompt,
+                    max_new_tokens,
+                    metrics_enabled,
+                    metrics_interval,
+                ),
+                HTTPStatus.CREATED,
+            )
             return
         if parsed.path.startswith("/api/runs/") and parsed.path.endswith("/stop"):
             run_id = parsed.path.removeprefix("/api/runs/").removesuffix("/stop").strip("/")
