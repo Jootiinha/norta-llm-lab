@@ -41,6 +41,14 @@ Rodar inferencia padrao:
 make run
 ```
 
+Rodar inferencia com monitor vinculado ao PID:
+
+```bash
+make run-monitor
+```
+
+Esse fluxo mostra o monitor no topo, as ultimas linhas do console abaixo em tempo quase real e salva a saida completa em `logs/run-monitor-*.log`.
+
 Rodar monitor:
 
 ```bash
@@ -77,7 +85,7 @@ make clean
 - Ao criar utilitarios Python, coloque-os em `src/utils/`.
 - Ao criar scripts auxiliares de shell, coloque-os em `scripts/`.
 - Atualize o `README.md` quando mudar comandos, estrutura ou fluxo de uso.
-- Evite mudar os nomes dos diretorios de modelos sem atualizar `scripts/run.sh` e o README.
+- Evite mudar os nomes dos diretorios de modelos sem atualizar o `Makefile`, os scripts em `scripts/` e o README.
 
 ## Validacao antes de finalizar
 

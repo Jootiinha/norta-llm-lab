@@ -189,6 +189,31 @@ def card(title: str, value: str, detail: str, percent: float | None = None) -> s
     )
 
 
+def read_log_tail(path: Path | None, max_lines: int) -> list[str]:
+    if path is None or max_lines <= 0:
+        return []
+    if not path.exists():
+        return [f"Aguardando log: {path}"]
+
+    lines: deque[str] = deque(maxlen=max_lines)
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as file:
+            for line in file:
+                lines.append(line.rstrip("\n"))
+    except OSError as error:
+        return [f"Nao foi possivel ler o log: {error}"]
+
+    return list(lines) or ["Log ainda sem saida."]
+
+
+def truncate_line(value: str, width: int) -> str:
+    if width <= 1:
+        return ""
+    if len(value) <= width:
+        return value
+    return value[: width - 1] + "…"
+
+
 def collect_metrics(
     previous_cpu: CpuSnapshot,
     previous_pid_ticks: int | None,
@@ -232,9 +257,15 @@ def collect_metrics(
     return metrics, current_cpu, current_pid_ticks
 
 
-def render(metrics: Metrics, history: dict[str, deque[float]], pid: int | None) -> str:
-    width = shutil.get_terminal_size((100, 32)).columns
-    line = "─" * min(width, 100)
+def render(
+    metrics: Metrics,
+    history: dict[str, deque[float]],
+    pid: int | None,
+    log_file: Path | None = None,
+    log_lines: int = 0,
+) -> str:
+    width = min(shutil.get_terminal_size((100, 32)).columns, 120)
+    line = "─" * width
     gpu_title = metrics.gpu_name or "GPU nao detectada"
 
     cards = [
@@ -265,7 +296,7 @@ def render(metrics: Metrics, history: dict[str, deque[float]], pid: int | None) 
     elif pid is not None:
         pid_label = f"PID {pid}: nao encontrado ou aguardando amostra"
 
-    return "\n".join(
+    dashboard = "\n".join(
         [
             CLEAR,
             f"{BOLD}{CYAN}LLM Training Monitor{RESET} {DIM}Ctrl+C para sair | {metrics.samples_per_second:.2f} amostras/s | {pid_label}{RESET}",
@@ -280,9 +311,19 @@ def render(metrics: Metrics, history: dict[str, deque[float]], pid: int | None) 
             f"RAM  {sparkline(history['mem'])} {metrics.mem_percent:5.1f}%",
             f"GPU  {sparkline(history['gpu'])} {fmt_percent(metrics.gpu_percent)}",
             f"VRAM {sparkline(history['vram'])} {fmt_percent(metrics.gpu_mem_percent)}",
-            "",
         ]
     )
+
+    if log_file is None:
+        return dashboard + "\n"
+
+    log_tail = read_log_tail(log_file, log_lines)
+    console_lines = [
+        line,
+        f"{BOLD}{BLUE}Console{RESET} {DIM}{log_file}{RESET}",
+    ]
+    console_lines.extend(truncate_line(value, width) for value in log_tail)
+    return dashboard + "\n" + "\n".join(console_lines) + "\n"
 
 
 def main() -> None:
@@ -290,6 +331,9 @@ def main() -> None:
     parser.add_argument("--interval", type=float, default=1.0, help="Intervalo de atualizacao em segundos.")
     parser.add_argument("--pid", type=int, default=None, help="PID do treino ou inferencia para acompanhar CPU/RAM do processo.")
     parser.add_argument("--once", action="store_true", help="Coleta uma amostra e encerra.")
+    parser.add_argument("--exit-when-pid-exits", action="store_true", help="Encerra quando o PID informado nao existir mais.")
+    parser.add_argument("--log-file", type=Path, default=None, help="Arquivo de log para exibir abaixo do monitor.")
+    parser.add_argument("--log-lines", type=int, default=12, help="Quantidade de linhas do log exibidas no console.")
     args = parser.parse_args()
 
     history = {
@@ -316,8 +360,10 @@ def main() -> None:
             history["gpu"].append(metrics.gpu_percent or 0.0)
             history["vram"].append(metrics.gpu_mem_percent or 0.0)
 
-            print(render(metrics, history, args.pid), end="", flush=True)
+            print(render(metrics, history, args.pid, args.log_file, args.log_lines), end="", flush=True)
             if args.once:
+                break
+            if args.exit_when_pid_exits and args.pid is not None and not Path(f"/proc/{args.pid}").exists():
                 break
     except KeyboardInterrupt:
         pass

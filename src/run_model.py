@@ -25,7 +25,7 @@ def main() -> None:
     parser.add_argument("--max-new-tokens", type=int, default=300)
     args = parser.parse_args()
 
-    print(f"Carregando modelo: {args.model}")
+    print(f"Carregando modelo: {args.model}", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 
@@ -55,8 +55,8 @@ def main() -> None:
         skip_special_tokens=True,
     )
 
-    print("\n--- RESPOSTA ---\n")
-    print(answer)
+    print("\n--- RESPOSTA ---\n", flush=True)
+    print(answer, flush=True)
 
 
 if __name__ == "__main__":

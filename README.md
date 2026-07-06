@@ -105,6 +105,20 @@ O script padrao usa `models/qwen3-0.6b`:
 make run
 ```
 
+Para rodar a inferencia e abrir o monitor vinculado ao PID do processo:
+
+```bash
+make run-monitor
+```
+
+O terminal mostra os dados do monitor no topo e as ultimas linhas do console abaixo, atualizadas em tempo quase real. A saida completa tambem fica salva em `logs/run-monitor-*.log`.
+
+Para mudar a quantidade de linhas do console exibidas abaixo do monitor:
+
+```bash
+MONITOR_LOG_LINES=20 make run-monitor
+```
+
 Para escolher outro modelo ou prompt:
 
 ```bash
